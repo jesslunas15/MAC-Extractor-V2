@@ -33,49 +33,39 @@
 
       if (!files.length) return;
 
-      let combinedRows = [];
-      const basenames = [];
-
       for (const file of files) {
+        let allRows = [];
+        let baseName = "";
+
         if (/\.zip$/i.test(file.name)) {
           const zip = await JSZip.loadAsync(file);
           const excelFiles = Object.keys(zip.files).filter(fn => fn.match(/\.(xlsx|xls)$/i));
           for (const filename of excelFiles) {
             const content = await zip.files[filename].async("blob");
             const rows = await extractRows(content);
-            combinedRows = combinedRows.concat(rows);
+            allRows = allRows.concat(rows);
           }
-          basenames.push(file.name.replace(/\.zip$/i, ""));
+          baseName = file.name.replace(/\.zip$/i, "");
         } else if (/\.(xlsx|xls)$/i.test(file.name)) {
           const rows = await extractRows(file);
-          combinedRows = combinedRows.concat(rows);
-          basenames.push(file.name.replace(/\.(xlsx|xls)$/i, ""));
+          allRows = allRows.concat(rows);
+          baseName = file.name.replace(/\.(xlsx|xls)$/i, "");
+        }
+
+        if (allRows.length) {
+          await processRows(allRows, baseName);
         }
       }
-
-      if (combinedRows.length === 0) {
-        output.textContent = "No data found in the selected files.";
-        return;
-      }
-
-      // final output base name: single filename if only one input, otherwise merged_<ts>
-      const baseName = basenames.length === 1 ? basenames[0] : `merged_${Date.now()}`;
-      await processRows(combinedRows, baseName);
     }
 
     async function extractRows(fileBlob) {
-      // Convert file (Blob or File) to arrayBuffer and return sheet as array of arrays
       const data = await fileBlob.arrayBuffer();
       const workbook = XLSX.read(data, { type: "array" });
       const sheet = workbook.Sheets[workbook.SheetNames[0]];
-      // header:1 -> returns rows as arrays
       return XLSX.utils.sheet_to_json(sheet, { header: 1, defval: "" });
     }
 
     async function processRows(rows, baseName) {
-      // -- Robust detection of start row (skip header if present) --
-      // We expect MACs in column index 1 (r[1]) and AP name in r[4].
-      // Detect the first row that looks like a MAC address; start there.
       const macRegex = /^[0-9A-F]{2}([:-][0-9A-F]{2}){5}$/i;
       let firstMacIndex = -1;
       for (let i = 0; i < Math.min(10, rows.length); i++) {
@@ -85,37 +75,28 @@
           break;
         }
       }
-      // If no clear MAC row found, assume there's a header and skip first row.
       const dataStart = firstMacIndex >= 0 ? firstMacIndex : 1;
       const dataRows = rows.slice(dataStart).filter(r => Array.isArray(r));
 
-      // Map safe: take [col2, col5] => [r[1], r[4]]
       const mapped = dataRows.map(r => {
         const col2 = (r[1] !== undefined && r[1] !== null) ? String(r[1]).trim() : "";
         const col5 = (r[4] !== undefined && r[4] !== null) ? String(r[4]).trim() : "";
         return [col2, col5];
-      }).filter(([col2, col5]) => col2 && col5); // require both
+      }).filter(([col2, col5]) => col2 && col5);
 
-      // Group by AP name (col5)
       const groups = {};
       mapped.forEach(([mac, ap]) => {
-        const key = String(ap);
-        groups[key] = groups[key] || [];
-        groups[key].push(mac);
+        if (!groups[ap]) groups[ap] = new Set();
+        groups[ap].add(mac); // prevent duplicates inside this AP group
       });
 
-      // Optional: remove duplicate MACs per AP (comment out if you want duplicates)
-      Object.keys(groups).forEach(k => {
-        groups[k] = Array.from(new Set(groups[k]));
-      });
-
-      // Keep only AP groups whose name contains "free" (case-insensitive)
+      // keep only AP names containing "free"
       const filteredGroups = Object.keys(groups)
         .filter(k => k.toLowerCase().includes("free"))
         .sort()
-        .reduce((o, k) => { o[k] = groups[k]; return o; }, {});
+        .reduce((o, k) => { o[k] = Array.from(groups[k]); return o; }, {});
 
-      // Build display table (long format)
+      // Display table
       const table = document.createElement("table");
       const thead = document.createElement("thead");
       const trHead = document.createElement("tr");
@@ -143,7 +124,7 @@
       table.appendChild(tbody);
       document.getElementById("output").appendChild(table);
 
-      // Prepare Excel (long format)
+      // Excel output
       const wsData = [["Access Point", "MAC Address"]];
       for (const apName of Object.keys(filteredGroups)) {
         filteredGroups[apName].forEach(mac => wsData.push([apName, mac]));
@@ -152,18 +133,15 @@
       const ws = XLSX.utils.aoa_to_sheet(wsData);
       const wb = XLSX.utils.book_new();
       XLSX.utils.book_append_sheet(wb, ws, "Processed");
-
       const wbout = XLSX.write(wb, { bookType: "xlsx", type: "array" });
       const blob = new Blob([wbout], { type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" });
 
-      // Single download button for the merged file
       const url = URL.createObjectURL(blob);
       const btn = document.createElement("a");
       btn.href = url;
       btn.download = baseName + "_processed.xlsx";
       btn.textContent = btn.download;
       btn.className = "download-btn";
-      // Revoke URL after click to free memory
       btn.addEventListener('click', () => setTimeout(() => URL.revokeObjectURL(url), 1500));
       document.getElementById("downloadContainer").appendChild(btn);
     }
